@@ -12,6 +12,6 @@ public class WebSocketConfig implements WebSocketConfigurer {
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(new SignalingHandler(), "/socket")
-                .setAllowedOrigins("*");
+                .setAllowedOrigins("https://front-webrtc.vercel.app/");
     }
 }
