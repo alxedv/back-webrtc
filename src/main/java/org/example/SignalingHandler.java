@@ -7,23 +7,29 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.io.IOException;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class SignalingHandler extends TextWebSocketHandler {
-    private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
+
+    // --- VARIÁVEIS NOVAS (AQUI ESTAVA FALTANDO O 'rooms') ---
+
+    // 1. Mapa para guardar as SALAS (Nome da Sala -> Conjunto de Sessões)
+    // Ex: "sala-01" -> [SessaoDoJoao, SessaoDaMaria]
+    private final Map<String, Set<WebSocketSession>> rooms = new ConcurrentHashMap<>();
+
+    // 2. Mapa auxiliar para saber em qual sala a pessoa está (para quando ela desconectar)
+    // Ex: "ID-Sessao-Joao" -> "sala-01"
+    private final Map<String, String> sessionRoomMap = new ConcurrentHashMap<>();
+
     private final Gson gson = new Gson();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
-        String sessionId = session.getId();
-        sessions.put(sessionId, session);
-        System.out.println("Usuário conectado: " + sessionId);
-
-        JsonObject welcome = new JsonObject();
-        welcome.addProperty("type", "id");
-        welcome.addProperty("id", sessionId);
-        session.sendMessage(new TextMessage(gson.toJson(welcome)));
+        System.out.println("Conexão estabelecida: " + session.getId());
+        // Aqui não fazemos nada, esperamos o usuário mandar a mensagem de "join"
     }
 
     @Override
@@ -31,21 +37,69 @@ public class SignalingHandler extends TextWebSocketHandler {
         String payload = message.getPayload();
         JsonObject jsonMessage = gson.fromJson(payload, JsonObject.class);
 
-        if(jsonMessage.has("target")) {
-            String targetId = jsonMessage.get("target").getAsString();
-            WebSocketSession targetSession = sessions.get(targetId);
+        // --- AQUI SE RESOLVE O MISTÉRIO DO 'type' ---
+        // Lemos qual é o tipo da mensagem que o React mandou
+        String type = jsonMessage.get("type").getAsString();
 
-            if (targetSession != null && targetSession.isOpen()) {
-                targetSession.sendMessage(new TextMessage(payload));
+        // LÓGICA 1: USUÁRIO QUER ENTRAR NA SALA
+        if ("join".equals(type)) {
+            String roomName = jsonMessage.get("room").getAsString();
+
+            // Cria a sala se não existir
+            Set<WebSocketSession> clients = rooms.computeIfAbsent(roomName, k -> ConcurrentHashMap.newKeySet());
+
+            // --- REGRA DE OURO: Limite de 2 pessoas (1:1) ---
+            if (clients.size() >= 2) {
+                System.out.println("Sala cheia: " + roomName + ". Rejeitando " + session.getId());
+
+                // Manda erro pro Front
+                JsonObject errorMsg = new JsonObject();
+                errorMsg.addProperty("type", "full");
+                errorMsg.addProperty("message", "Sala cheia!");
+                session.sendMessage(new TextMessage(gson.toJson(errorMsg)));
+                return;
             }
-        } else {
-            System.out.println("Mensagem sem target recebida: " + payload);
+
+            // Adiciona usuário na sala
+            clients.add(session);
+            sessionRoomMap.put(session.getId(), roomName);
+            System.out.println("Sessão " + session.getId() + " entrou na sala: " + roomName);
+
+        }
+        // LÓGICA 2: TROCA DE MENSAGENS (Offer, Answer, Candidate)
+        // Se a mensagem tiver o campo 'room', nós reencaminhamos para quem está lá
+        else if (jsonMessage.has("room")) {
+            String roomName = jsonMessage.get("room").getAsString();
+            Set<WebSocketSession> clientsInRoom = rooms.get(roomName);
+
+            if (clientsInRoom != null) {
+                // Loop: Manda para todo mundo na sala, MENOS para quem enviou
+                for (WebSocketSession client : clientsInRoom) {
+                    if (!client.getId().equals(session.getId()) && client.isOpen()) {
+                        client.sendMessage(message);
+                    }
+                }
+            }
         }
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
-        sessions.remove(session.getId());
-        System.out.println("Usuário desconectado: " + session.getId());
+        // Quando desconectar, precisamos limpar a bagunça
+        String roomName = sessionRoomMap.remove(session.getId());
+
+        if (roomName != null) {
+            Set<WebSocketSession> clients = rooms.get(roomName);
+            if (clients != null) {
+                clients.remove(session); // Remove da lista da sala
+                System.out.println("Saiu da sala: " + roomName);
+
+                // Se a sala ficar vazia, podemos apagar ela da memória pra economizar
+                if (clients.isEmpty()) {
+                    rooms.remove(roomName);
+                }
+            }
+        }
+        System.out.println("Desconectado: " + session.getId());
     }
 }
